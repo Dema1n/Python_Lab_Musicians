@@ -2,10 +2,10 @@ import sqlite3
 import requests
 from bs4 import BeautifulSoup
 import time
-from re import sub
 from config import GENIUS_ACCESS_TOKEN
 
 GENIUS_API_URL = "https://api.genius.com"
+
 
 def create_tables():
     with sqlite3.connect("data/database.db") as db:
@@ -44,7 +44,7 @@ def create_tables():
 
 
 def search_song_via_api(band_name, song_name):
-    if not GENIUS_ACCESS_TOKEN or GENIUS_ACCESS_TOKEN == "YOUR_ACCESS_TOKEN_HERE":
+    if not GENIUS_ACCESS_TOKEN:
         return "ОТСУТСТВУЕТ_ССЫЛКА_НА_ТЕКСТ"
 
     headers = {
@@ -69,13 +69,11 @@ def search_song_via_api(band_name, song_name):
 
                     if result_type == 'song':
                         song_url = result.get('url')
-                        full_title = result.get('full_title', '')
                         return song_url
 
                 if hits:
                     first_result = hits[0].get('result', {})
                     song_url = first_result.get('url')
-                    full_title = first_result.get('full_title', '')
 
                     return song_url
 
@@ -86,8 +84,9 @@ def search_song_via_api(band_name, song_name):
         else:
             return "ОТСУТСТВУЕТ_ССЫЛКА_НА_ТЕКСТ"
 
-    except Exception as e:
+    except Exception:
         return "ОТСУТСТВУЕТ_ССЫЛКА_НА_ТЕКСТ"
+
 
 def parse_band_links(content):
     bands = []
@@ -108,6 +107,60 @@ def parse_band_links(content):
         })
 
     return bands
+
+
+def ul_header(ul):
+    albums_list = []
+    for li in ul.find_all('li'):
+        album_link = li.find('a')
+        if album_link:
+            album_name = album_link.get_text().strip()
+            album_url = album_link.get('href')
+
+            if (album_url and
+                    album_url.startswith('/wiki/') and
+                    not album_url.startswith('/wiki/#') and
+                    not album_url.startswith('#')):
+
+                full_url = f"https://ru.wikipedia.org{album_url}"
+
+                if album_name and not any(x in album_name for x in
+                                          ['http:', 'Релиз:', 'Выпущен:', 'Официальный сайт', 'Записан:',
+                                           'Издан:']):
+                    albums_list.append({
+                        'name': album_name,
+                        'url': full_url
+                    })
+    return albums_list
+
+
+def not_ul_header(discography_h2):
+    albums_list = []
+    table = discography_h2.find_next('table')
+    if table:
+        for row in table.find_all('tr')[1:]:
+            cells = row.find_all('td')
+            if cells:
+                album_cell = cells[0]
+                album_link = album_cell.find('a')
+                if album_link:
+                    album_name = album_link.get_text().strip()
+                    album_url = album_link.get('href')
+                    if (album_url and
+                            album_url.startswith('/wiki/') and
+                            not album_url.startswith('/wiki/#') and
+                            not album_url.startswith('#')):
+
+                        full_url = f"https://ru.wikipedia.org{album_url}"
+
+                        if album_name and not any(x in album_name for x in
+                                                  ['http:', 'Релиз:', 'Выпущен:', 'Официальный сайт',
+                                                   'Записан:', 'Издан:']):
+                            albums_list.append({
+                                'name': album_name,
+                                'url': full_url
+                            })
+    return albums_list
 
 
 def get_albums_from_wiki(wiki_url):
@@ -133,52 +186,9 @@ def get_albums_from_wiki(wiki_url):
             if not ul:
                 ul = discography_h2.find_next('ol')
             if not ul:
-                table = discography_h2.find_next('table')
-                if table:
-                    for row in table.find_all('tr')[1:]:
-                        cells = row.find_all('td')
-                        if cells:
-                            album_cell = cells[0]
-                            album_link = album_cell.find('a')
-                            if album_link:
-                                album_name = album_link.get_text().strip()
-                                album_url = album_link.get('href')
-                                if (album_url and
-                                        album_url.startswith('/wiki/') and
-                                        not album_url.startswith('/wiki/#') and
-                                        not album_url.startswith('#')):
-
-                                    full_url = f"https://ru.wikipedia.org{album_url}"
-
-                                    if album_name and not any(x in album_name for x in
-                                                              ['http:', 'Релиз:', 'Выпущен:', 'Официальный сайт',
-                                                               'Записан:', 'Издан:']):
-                                        albums_list.append({
-                                            'name': album_name,
-                                            'url': full_url
-                                        })
-
+                albums_list = not_ul_header(discography_h2)
             if ul:
-                for li in ul.find_all('li'):
-                    album_link = li.find('a')
-                    if album_link:
-                        album_name = album_link.get_text().strip()
-                        album_url = album_link.get('href')
-
-                        if (album_url and
-                                album_url.startswith('/wiki/') and
-                                not album_url.startswith('/wiki/#') and
-                                not album_url.startswith('#')):
-
-                            full_url = f"https://ru.wikipedia.org{album_url}"
-
-                            if album_name and not any(x in album_name for x in
-                                                      ['http:', 'Релиз:', 'Выпущен:', 'Официальный сайт', 'Записан:',
-                                                       'Издан:']):
-                                albums_list.append({
-                                    'name': album_name,
-                                    'url': full_url
-                                })
+                albums_list = ul_header(ul)
 
         return albums_list
 
@@ -187,12 +197,102 @@ def get_albums_from_wiki(wiki_url):
         return []
 
 
+def track_table_way(track_table, band_name):
+    songs = []
+    for row in track_table.find_all('tr')[1:]:
+        cells = row.find_all(['td', 'th'])
+        if len(cells) >= 2:
+            song_cell = cells[1]
+            song_name = song_cell.get_text().strip()
+
+            if song_name and song_name not in ['Название', 'Name']:
+                if hasattr(song_cell, 'contents'):
+                    for content in song_cell.contents:
+                        if hasattr(content, 'name') and content.name == 'i':
+                            song_name = content.get_text().strip()
+                            break
+
+                lyrics_url = search_song_via_api(band_name, song_name)
+                songs.append({
+                    'name': song_name,
+                    'lyrics_url': lyrics_url
+                })
+    return songs
+
+
+def span_header_way(soup, band_name):
+    songs = []
+    if not songs:
+        tracks_section = soup.find('span', id='Список_композиций')
+        if not tracks_section:
+            tracks_section = soup.find('span', id='Трек-лист')
+        if not tracks_section:
+            tracks_section = soup.find('span', id='Композиции')
+
+        if tracks_section:
+            track_list = tracks_section.find_parent('h2').find_next_sibling('ul')
+            if not track_list:
+                track_list = tracks_section.find_parent('h2').find_next_sibling('ol')
+
+            if track_list:
+                for li in track_list.find_all('li'):
+                    song_text = li.get_text().strip()
+
+                    if '.' in song_text:
+                        song_name = song_text.split('.', 1)[1].strip()
+                    elif '«' in song_text and '»' in song_text:
+                        song_name = song_text.split('«')[1].split('»')[0].strip()
+                    else:
+                        song_name = song_text
+
+                    if '(' in song_name and ')' in song_name:
+                        song_name = song_name.split('(')[0].strip()
+
+                    if (song_name and
+                            len(song_name) > 2 and
+                            not any(x in song_name for x in [
+                                'http', 'версия', 'version', 'бонус', 'bonus',
+                                'трек', 'track', '№', '#', 'сингл', 'single'
+                            ])):
+                        lyrics_url = search_song_via_api(band_name, song_name)
+                        songs.append({
+                            'name': song_name,
+                            'lyrics_url': lyrics_url
+                        })
+    return songs
+
+
+def other_headers_way(soup, band_name):
+    songs = []
+    possible_tables = soup.find_all('table')
+    for table in possible_tables:
+        headers_text = table.get_text()
+        if any(x in headers_text for x in ['№', 'Название', 'Длительность', 'Track', 'Name', 'Length']):
+            for row in table.find_all('tr')[1:]:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) >= 2:
+                    song_name = cells[1].get_text().strip()
+                    if (song_name and
+                            len(song_name) > 1 and
+                            song_name not in ['Название', 'Name', 'Длительность', 'Length'] and
+                            not song_name.replace('.', '').isdigit()):
+                        lyrics_url = search_song_via_api(band_name, song_name)
+                        songs.append({
+                            'name': song_name,
+                            'lyrics_url': lyrics_url
+                        })
+            if songs:
+                break
+    return songs
+
+
 def get_songs_for_album(band_name, album_url):
+
+    songs = []
+
     headers = {
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     }
-
-    songs = []
 
     try:
         r = requests.get(url=album_url, headers=headers, timeout=10)
@@ -202,83 +302,13 @@ def get_songs_for_album(band_name, album_url):
 
             track_table = soup.find('table', class_='tracklist')
             if track_table:
-                for row in track_table.find_all('tr')[1:]:
-                    cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 2:
-                        song_cell = cells[1]
-                        song_name = song_cell.get_text().strip()
-
-                        if song_name and song_name not in ['Название', 'Name']:
-                            if hasattr(song_cell, 'contents'):
-                                for content in song_cell.contents:
-                                    if hasattr(content, 'name') and content.name == 'i':
-                                        song_name = content.get_text().strip()
-                                        break
-
-                            lyrics_url = search_song_via_api(band_name, song_name)
-                            songs.append({
-                                'name': song_name,
-                                'lyrics_url': lyrics_url
-                            })
+                songs = track_table_way(track_table, band_name)
 
             if not songs:
-                tracks_section = soup.find('span', id='Список_композиций')
-                if not tracks_section:
-                    tracks_section = soup.find('span', id='Трек-лист')
-                if not tracks_section:
-                    tracks_section = soup.find('span', id='Композиции')
-
-                if tracks_section:
-                    track_list = tracks_section.find_parent('h2').find_next_sibling('ul')
-                    if not track_list:
-                        track_list = tracks_section.find_parent('h2').find_next_sibling('ol')
-
-                    if track_list:
-                        for li in track_list.find_all('li'):
-                            song_text = li.get_text().strip()
-
-                            if '.' in song_text:
-                                song_name = song_text.split('.', 1)[1].strip()
-                            elif '«' in song_text and '»' in song_text:
-                                song_name = song_text.split('«')[1].split('»')[0].strip()
-                            else:
-                                song_name = song_text
-
-                            if '(' in song_name and ')' in song_name:
-                                song_name = song_name.split('(')[0].strip()
-
-                            if (song_name and
-                                    len(song_name) > 2 and
-                                    not any(x in song_name for x in [
-                                        'http', 'версия', 'version', 'бонус', 'bonus',
-                                        'трек', 'track', '№', '#', 'сингл', 'single'
-                                    ])):
-                                lyrics_url = search_song_via_api(band_name, song_name)
-                                songs.append({
-                                    'name': song_name,
-                                    'lyrics_url': lyrics_url
-                                })
+                songs = span_header_way(soup, band_name)
 
             if not songs:
-                possible_tables = soup.find_all('table')
-                for table in possible_tables:
-                    headers_text = table.get_text()
-                    if any(x in headers_text for x in ['№', 'Название', 'Длительность', 'Track', 'Name', 'Length']):
-                        for row in table.find_all('tr')[1:]:
-                            cells = row.find_all(['td', 'th'])
-                            if len(cells) >= 2:
-                                song_name = cells[1].get_text().strip()
-                                if (song_name and
-                                        len(song_name) > 1 and
-                                        song_name not in ['Название', 'Name', 'Длительность', 'Length'] and
-                                        not song_name.replace('.', '').isdigit()):
-                                    lyrics_url = search_song_via_api(band_name, song_name)
-                                    songs.append({
-                                        'name': song_name,
-                                        'lyrics_url': lyrics_url
-                                    })
-                        if songs:
-                            break
+                songs = other_headers_way(soup, band_name)
 
     except Exception as e:
         print(f"Ошибка при получении песен: {str(e)}")
@@ -334,27 +364,30 @@ def get_all_bands_from_category(base_url):
     return all_bands
 
 
-def save_bands_albums_songs_to_db(bands_data):
-    total_processed_bands = 0
-    total_processed_albums = 0
-    total_processed_songs = 0
+def struct_data(bands_data):
 
-    bands_to_insert = []
-    albums_to_insert = []
-    songs_to_insert = []
+    result = {
+    "total_processed_bands" : 0,
+    "total_processed_albums" : 0,
+    "total_processed_songs" : 0,
+
+    "bands_to_insert" : [],
+    "albums_to_insert" : [],
+    "songs_to_insert" : []
+    }
 
     for band in bands_data:
         if band['url']:
             try:
                 albums_list = get_albums_from_wiki(band['url'])
 
-                bands_to_insert.append((band['name'], band['url']))
-                current_band_index = len(bands_to_insert)
+                result["bands_to_insert"].append((band['name'], band['url']))
+                current_band_index = len(result["bands_to_insert"])
 
                 for album_data in albums_list:
-                    albums_to_insert.append((current_band_index, album_data['name']))
+                    result["albums_to_insert"].append((current_band_index, album_data['name']))
 
-                    current_album_index = len(albums_to_insert)
+                    current_album_index = len(result["albums_to_insert"])
 
                     if album_data['url']:
                         songs_list = get_songs_for_album(band['name'], album_data['url'])
@@ -362,15 +395,15 @@ def save_bands_albums_songs_to_db(bands_data):
                         for song in songs_list:
                             final_lyrics_url = song['lyrics_url']
 
-                            songs_to_insert.append((
+                            result["songs_to_insert"].append((
                                 current_album_index,
                                 song['name'],
                                 final_lyrics_url
                             ))
-                        total_processed_songs += len(songs_list)
+                        result["total_processed_songs"] += len(songs_list)
 
-                total_processed_bands += 1
-                total_processed_albums += len(albums_list)
+                result["total_processed_bands"] += 1
+                result["total_processed_albums"] += len(albums_list)
 
                 print(f"Обработано: {band['name']} - {len(albums_list)} альбомов")
 
@@ -378,6 +411,21 @@ def save_bands_albums_songs_to_db(bands_data):
 
             except Exception as e:
                 print(f"Ошибка с группой {band['name']}: {e}")
+
+    return result
+
+
+def save_bands_albums_songs_to_db(bands_data):
+
+    result_data = struct_data(bands_data)
+
+    total_processed_bands = result_data["total_processed_bands"]
+    total_processed_albums = result_data["total_processed_albums"]
+    total_processed_songs = result_data["total_processed_songs"]
+
+    bands_to_insert = result_data["bands_to_insert"]
+    albums_to_insert = result_data["albums_to_insert"]
+    songs_to_insert = result_data["songs_to_insert"]
 
     if bands_to_insert:
         with sqlite3.connect('data/database.db') as db:
